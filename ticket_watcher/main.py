@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -82,23 +83,92 @@ def save_state(state: dict) -> None:
         json.dump(state, f, indent=2)
 
 
+BROWSERLESS_CONTENT_URL = "https://production-sfo.browserless.io/content"
+SCRAPE_ATTEMPTS = 3
+BLOCK_PAGE_MARKERS = (
+    "your browsing activity has been paused",
+    "let's get your identity verified",
+    "access denied",
+)
+
+
 def scrape_listing(firecrawl: Firecrawl, url: str) -> str:
+    """Fetch the public listing once with Firecrawl's rendered scraper."""
     result = firecrawl.scrape(
         url,
         formats=["markdown"],
         wait_for=4000,
         only_main_content=False,
         max_age=0,
+        timeout=60000,
+        location={"country": "DE", "languages": ["de-DE"]},
+        proxy="auto",
     )
     markdown = getattr(result, "markdown", None)
     if markdown is None and isinstance(result, dict):
         markdown = result.get("markdown")
-    return markdown or ""
+    return validate_listing_content(markdown or "", "Firecrawl")
+
+
+def scrape_listing_browserless(api_key: str, url: str) -> str:
+    """Fallback scraper: real headless Chrome via Browserless, used only when
+    Firecrawl fails or returns empty content. Returns rendered HTML (not
+    markdown) - Gemini is prompted generically enough to read either.
+
+    The fallback is for normal provider/network failures only. It does not
+    interact with Ticketmaster's ticket picker, queues, or checkout."""
+    resp = requests.post(
+        BROWSERLESS_CONTENT_URL,
+        params={
+            "token": api_key,
+        },
+        json={
+            "url": url,
+            "gotoOptions": {"waitUntil": "networkidle2", "timeout": 30000},
+            "waitForTimeout": 4000,
+            "bestAttempt": True,
+            "rejectResourceTypes": ["image", "media", "font"],
+        },
+        timeout=90,
+    )
+    resp.raise_for_status()
+    target_status = int(resp.headers.get("X-Response-Code", "200"))
+    if target_status >= 400:
+        status_text = resp.headers.get("X-Response-Status", "unknown error")
+        raise RuntimeError(f"Browserless reached Ticketmaster but it returned {target_status} {status_text}")
+    return validate_listing_content(resp.text, "Browserless")
+
+
+def validate_listing_content(content: str, source: str) -> str:
+    """Reject empty responses and known block pages before Gemini classifies them."""
+    normalized = content.strip()
+    if not normalized:
+        raise RuntimeError(f"{source} returned empty content")
+    lowered = normalized.lower()
+    if any(marker in lowered for marker in BLOCK_PAGE_MARKERS):
+        raise RuntimeError(f"{source} returned a Ticketmaster block page")
+    return normalized
+
+
+def scrape_with_retries(scrape, source: str) -> str:
+    """Retry short-lived provider failures before trying the next provider."""
+    last_error: Exception | None = None
+    for attempt in range(1, SCRAPE_ATTEMPTS + 1):
+        try:
+            return scrape()
+        except Exception as exc:
+            last_error = exc
+            if attempt == SCRAPE_ATTEMPTS:
+                break
+            delay = attempt * 2
+            logger.warning("%s attempt %s/%s failed: %s; retrying in %ss", source, attempt, SCRAPE_ATTEMPTS, exc, delay)
+            time.sleep(delay)
+    raise RuntimeError(f"{source} failed after {SCRAPE_ATTEMPTS} attempts: {last_error}")
 
 
 def ask_gemini(client: genai.Client, model: str, markdown: str) -> dict:
     events_desc = "\n".join(f"- {e.id}: {e.url}" for e in EVENTS)
-    prompt = f"""This is the markdown of a Ticketmaster.de artist tour-dates listing page.
+    prompt = f"""This is the markdown or HTML of a Ticketmaster.de artist tour-dates listing page.
 
 Page content:
 ---
@@ -140,12 +210,21 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
     resp.raise_for_status()
 
 
+def send_failure_alert(token: str, chat_id: str, detail: str) -> None:
+    """Best-effort alert; do not hide the original failure if Telegram is down."""
+    try:
+        send_telegram(token, chat_id, f"⚠️ James Blake ticket watcher failed\n{detail}")
+    except Exception as exc:
+        logger.error("Could not send the Telegram failure alert: %s", exc)
+
+
 def main() -> None:
     firecrawl_key = os.environ["FIRECRAWL_API_KEY"]
     gemini_key = os.environ["GEMINI_API_KEY"]
     tg_token = os.environ["TELEGRAM_BOT_TOKEN"]
     tg_chat_id = os.environ["TELEGRAM_CHAT_ID"]
     gemini_model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+    browserless_key = os.environ.get("BROWSERLESS_API_KEY", "")
 
     firecrawl = Firecrawl(api_key=firecrawl_key)
     gemini_client = genai.Client(api_key=gemini_key)
@@ -154,10 +233,35 @@ def main() -> None:
     now = datetime.now(timezone.utc).isoformat()
 
     try:
-        markdown = scrape_listing(firecrawl, ARTIST_URL)
+        markdown = scrape_with_retries(
+            lambda: scrape_listing(firecrawl, ARTIST_URL), "Firecrawl"
+        )
+        source = "Firecrawl"
+    except Exception as firecrawl_exc:
+        if not browserless_key:
+            detail = f"Firecrawl failed and no Browserless key is configured: {firecrawl_exc}"
+            logger.error("ERROR: %s", detail)
+            send_failure_alert(tg_token, tg_chat_id, detail)
+            sys.exit(1)
+        logger.warning("Firecrawl failed (%s), falling back to Browserless", firecrawl_exc)
+        try:
+            markdown = scrape_with_retries(
+                lambda: scrape_listing_browserless(browserless_key, ARTIST_URL), "Browserless"
+            )
+            source = "Browserless"
+        except Exception as fallback_exc:
+            detail = f"Firecrawl and Browserless both failed: {fallback_exc}"
+            logger.error("ERROR: %s", detail)
+            send_failure_alert(tg_token, tg_chat_id, detail)
+            sys.exit(1)
+
+    logger.info("Listing source: %s", source)
+
+    try:
         parsed = ask_gemini(gemini_client, gemini_model, markdown)
     except Exception as exc:
         logger.error("ERROR: %s", exc)
+        send_failure_alert(tg_token, tg_chat_id, f"Gemini could not classify the listing: {exc}")
         sys.exit(1)
 
     by_id = {row["event_id"]: row for row in parsed.get("events", [])}

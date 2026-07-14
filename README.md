@@ -11,7 +11,10 @@ Ticketmaster's own availability badge for either date changes.
 
 1. [Firecrawl](https://firecrawl.dev) scrapes the **artist tour-dates listing
    page** (`ticketmaster.de/artist/james-blake-tickets/765513`), not the
-   individual event pages, and returns clean markdown.
+   individual event pages, and returns clean markdown. If Firecrawl errors or
+   returns empty or a block page, [Browserless](https://browserless.io) (real
+   headless Chrome) retries the same listing page. Both providers
+   are retried three times; Browserless is used only after Firecrawl fails.
 2. Gemini (your personal API key) reads that markdown and, for each of the two
    Berlin event ids, extracts Ticketmaster's own per-date status badge (e.g.
    "Wenige oder keine Tickets verfügbar" = few or no tickets available) and
@@ -19,7 +22,11 @@ Ticketmaster's own availability badge for either date changes.
 3. State (badge text + listed flag) is kept in `state/state.json`, committed
    back to the repo each run. A Telegram message is sent only when a badge or
    listed-status **changes** from the previous run, so you get one alert, not
-   one every 30 minutes.
+   one every 30 minutes. If all scrapes or the Gemini classification fail, it
+   also sends a Telegram failure alert.
+4. A second scheduled check opens the public event page in a standard
+   Browserless browser session and tests 1 ticket first, then 2 tickets if 1
+   succeeds. It stops before checkout and sends its result to Telegram.
 
 ### Why the listing page, not the event page
 
@@ -36,10 +43,8 @@ Tested live before shipping this, in this order:
    signal we need, with zero interaction with any anti-bot/CAPTCHA system.
 
 So this watcher only reads the listing page. It never clicks through to an
-event page's buy flow — clicking Ticketmaster's "Tickets" button is what
-triggers `iamNotaRobot.js` / `abuse-component.js` / `gec/v3/Event` bot-check
-calls, and automating past that on a recurring schedule isn't something to
-build, intent aside.
+event page's buy flow, and automating past that on a recurring schedule
+isn't something to build, intent aside.
 
 Trade-off to know about: the listing badge is coarser than the live event
 page. "Wenige oder keine Tickets verfügbar" doesn't tell you the exact
@@ -72,6 +77,19 @@ Grab a key from [Google AI Studio](https://aistudio.google.com/apikey)
 keeps pointed at a current Flash-tier model, so it won't go stale like a
 pinned version number would).
 
+### 3b. Browserless API key (optional fallback)
+Grab a key from [browserless.io](https://www.browserless.io)
+(`BROWSERLESS_API_KEY`). Only used if Firecrawl fails or comes back empty —
+leave unset and the watcher sends a Telegram failure alert on a Firecrawl
+outage instead of falling back.
+
+Browserless is also required for the scheduled 1-then-2 quantity check. That
+check uses the normal Browserless WebSocket endpoint—no stealth route and no
+proxy parameters. It uses a 60-second session limit, blocks common ad/tracker
+assets, and sets an English viewport. Add `BROWSERLESS_API_KEY` as a GitHub
+Actions secret. Set `BROWSERLESS_ENDPOINT` only if you need to use another
+Browserless region supported by your account.
+
 ### 4. Push this repo to GitHub
 ```bash
 git init
@@ -91,6 +109,7 @@ secret, add all four:
 - `GEMINI_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
+- `BROWSERLESS_API_KEY` (optional — Firecrawl fallback)
 
 ### 6. Test it locally first
 

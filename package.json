@@ -1,0 +1,14 @@
+{
+  "name": "james-blake-ticket-watcher",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.0.0"
+  },
+  "scripts": {
+    "check-quantity": "node ticket_watcher/ticket-checker.mjs"
+  }
+}
