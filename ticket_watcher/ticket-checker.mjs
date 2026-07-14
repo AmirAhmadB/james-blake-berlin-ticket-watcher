@@ -10,15 +10,6 @@ const BROWSERLESS_ENDPOINT = process.env.BROWSERLESS_ENDPOINT ?? 'wss://producti
 const BROWSERLESS_WS = new URL(BROWSERLESS_ENDPOINT);
 BROWSERLESS_WS.searchParams.set('token', BROWSERLESS_TOKEN);
 BROWSERLESS_WS.searchParams.set('timeout', '60000');
-BROWSERLESS_WS.searchParams.set('blockAds', 'true');
-BROWSERLESS_WS.searchParams.set(
-  'blockAdsInclude',
-  'ublock-filters,easylist,easyprivacy,pgl,ublock-badware,urlhaus-full',
-);
-const BROWSERLESS_LAUNCH = JSON.stringify({
-  args: ['--window-size=1440,1000', '--lang=en-US'],
-});
-BROWSERLESS_WS.searchParams.set('launch', BROWSERLESS_LAUNCH);
 
 const BLOCK_MARKERS = [
   'your browsing activity has been paused',

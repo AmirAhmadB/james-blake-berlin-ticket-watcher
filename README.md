@@ -85,10 +85,9 @@ outage instead of falling back.
 
 Browserless is also required for the scheduled 1-then-2 quantity check. That
 check uses the normal Browserless WebSocket endpoint—no stealth route and no
-proxy parameters. It uses a 60-second session limit, blocks common ad/tracker
-assets, and sets an English viewport. Add `BROWSERLESS_API_KEY` as a GitHub
-Actions secret. Set `BROWSERLESS_ENDPOINT` only if you need to use another
-Browserless region supported by your account.
+proxy parameters. It uses a 60-second session limit. Add
+`BROWSERLESS_API_KEY` as a GitHub Actions secret. Set `BROWSERLESS_ENDPOINT`
+only if you need to use another Browserless region supported by your account.
 
 ### 4. Push this repo to GitHub
 ```bash
